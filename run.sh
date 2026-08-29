@@ -171,7 +171,7 @@ do_demo() {
     do_build || return 1
     ensure_training_data
     heading "Demo: training a tiny byte-level MoE model on $SAMPLE_FILE"
-    ./bin/train_save_moe "$SAMPLE_FILE" build/demo.tmo 4 4
+    ./bin/train_save_moe "$SAMPLE_FILE" build/demo.tmo 30 30
     heading "Demo: generating 120 bytes from the trained checkpoint"
     printf "the ternary" > build/demo_seed.txt
     ./bin/gen_moe_checkpoint build/demo.tmo build/demo_seed.txt 120

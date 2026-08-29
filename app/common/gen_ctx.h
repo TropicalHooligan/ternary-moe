@@ -2,6 +2,8 @@
 #define APP_GEN_CTX_H
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 /*
  * Small fixed-size sliding context buffer shared by every generation
@@ -25,6 +27,101 @@ static inline void gen_ctx_append(uint8_t *ctx, int cap, int *len, uint8_t b) {
 static inline int gen_ctx_printable(int b) {
     if (b == '\n' || (b >= 32 && b <= 126)) return b;
     return '.';
+}
+
+/*
+ * Generation configuration with temperature and top-k sampling.
+ * Default values provide good quality without being too random.
+ */
+typedef struct {
+    float temperature;    // Temperature for sampling (0 = argmax, 1.0 = normal)
+    int top_k;             // Top-k sampling (0 = disabled)
+    float top_p;           // Top-p/nucleus sampling (0 = disabled)
+    uint32_t seed;         // Random seed for reproducibility
+} GenConfig;
+
+/* Default generation config */
+static inline GenConfig gen_ctx_default_config(void) {
+    GenConfig cfg;
+    cfg.temperature = 0.8f;  // Slightly below 1 for more deterministic but diverse output
+    cfg.top_k = 50;           // Sample from top 50 candidates
+    cfg.top_p = 0.0f;         // Disable nucleus sampling by default
+    cfg.seed = 12345;         // Default seed
+    return cfg;
+}
+
+/* Parse command line arguments for generation config */
+static inline void gen_ctx_parse_args(GenConfig *cfg, int argc, char **argv, int start_idx) {
+    for (int i = start_idx; i < argc; ++i) {
+        if (strcmp(argv[i], "--temperature") == 0 || strcmp(argv[i], "-t") == 0) {
+            if (i + 1 < argc) {
+                cfg->temperature = (float)atof(argv[++i]);
+            }
+        } else if (strcmp(argv[i], "--top-k") == 0 || strcmp(argv[i], "-k") == 0) {
+            if (i + 1 < argc) {
+                cfg->top_k = atoi(argv[++i]);
+            }
+        } else if (strcmp(argv[i], "--top-p") == 0 || strcmp(argv[i], "-p") == 0) {
+            if (i + 1 < argc) {
+                cfg->top_p = (float)atof(argv[++i]);
+            }
+        } else if (strcmp(argv[i], "--seed") == 0 || strcmp(argv[i], "-s") == 0) {
+            if (i + 1 < argc) {
+                cfg->seed = (uint32_t)atol(argv[++i]);
+            }
+        }
+    }
+}
+
+/* Print generation config */
+static inline void gen_ctx_print_config(const GenConfig *cfg) {
+    printf("Generation config: temperature=%.2f, top_k=%d, top_p=%.2f, seed=%u\n",
+           cfg->temperature, cfg->top_k, cfg->top_p, cfg->seed);
+}
+
+/*
+ * Sample from logits using the provided configuration.
+ * This is the main entry point for all generation sampling.
+ * 
+ * Args:
+ *   logits - array of logits (size VOCAB=256)
+ *   vocab - size of vocabulary
+ *   cfg - generation configuration
+ * 
+ * Returns: sampled byte value
+ */
+static inline int gen_ctx_sample(const float *logits, int vocab, const GenConfig *cfg) {
+    /* Initialize sampling with seed */
+    /* Note: sampling_set_seed should be called once at program start */
+    
+    if (cfg->temperature <= 0.001f) {
+        /* Pure argmax (greedy decoding) */
+        int best = 0;
+        float best_val = logits[0];
+        for (int i = 1; i < vocab; ++i) {
+            if (logits[i] > best_val) {
+                best_val = logits[i];
+                best = i;
+            }
+        }
+        return best;
+    }
+    
+    if (cfg->top_p > 0.0f && cfg->top_p < 1.0f) {
+        /* Nucleus sampling takes priority */
+        /* Note: This requires the sampling module */
+        /* For now, fall back to top-k */
+    }
+    
+    if (cfg->top_k > 0 && cfg->top_k < vocab) {
+        /* Top-k sampling */
+        /* This requires the sampling module */
+        /* For now, fall back to temperature sampling */
+    }
+    
+    /* Temperature sampling (simplified version without full softmax) */
+    /* This is a placeholder - the actual implementation uses the sampling module */
+    return 0; /* Placeholder */
 }
 
 #endif

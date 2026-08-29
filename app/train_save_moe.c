@@ -14,8 +14,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int normal = argc > 3 ? atoi(argv[3]) : 3;
-    int qat = argc > 4 ? atoi(argv[4]) : 3;
+    int normal = argc > 3 ? atoi(argv[3]) : 30;  // Increased from 3 to 30
+    int qat = argc > 4 ? atoi(argv[4]) : 30;  // Increased from 3 to 30
     if (normal <= 0) normal = 1;
     if (qat <= 0) qat = 1;
 

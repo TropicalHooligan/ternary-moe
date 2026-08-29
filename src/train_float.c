@@ -11,6 +11,7 @@
 #include "context.h"
 #include "window.h"
 #include "ternary.h"
+#include "sampling.h"
 #include <stdio.h>
 
 enum {
@@ -19,15 +20,19 @@ enum {
     HID = 64,
     E = 4,
     CTX = 16,
-    DATA_MAX = 16384,
+    DATA_MAX = 65536,  // Increased from 16384 to support larger datasets
     RB1 = (DIM + 3) / 4,
     RB2 = (HID + 3) / 4,
     SCRATCH = (HID > DIM ? HID : DIM),
     CKPT_MAGIC = 0x544D4F45u
 };
 
-static uint8_t data[DATA_MAX];
+static uint8_t *data = NULL;  // Dynamically allocated
 static int data_len = 0;
+static int data_capacity = 0;
+
+/* Generation configuration */
+static TrainFloatGenConfig gen_config;
 static int8_t emb[VOCAB * DIM];
 static uint8_t mw1[E * HID * RB1], mw2[E * DIM * RB2];
 static float head_w[VOCAB * DIM];
@@ -42,6 +47,19 @@ static uint8_t wbuf[CTX];
 static ByteWindow win;
 
 int train_float_load(const char *path) {
+    /* Ensure we have enough capacity */
+    if (data_capacity < DATA_MAX) {
+        uint8_t *new_data = (uint8_t *)realloc(data, DATA_MAX);
+        if (!new_data) {
+            free(data);
+            data = NULL;
+            data_capacity = 0;
+            data_len = 0;
+            return 0;
+        }
+        data = new_data;
+        data_capacity = DATA_MAX;
+    }
     data_len = data_load_file(data, DATA_MAX, path);
     return data_len;
 }
@@ -53,6 +71,20 @@ void train_float_init(void) {
     head_f32_zero(head_w, VOCAB, DIM);
     for (int i = 0; i < E; ++i) scores[i] = (float)i;
     window_reset(&win, wbuf, CTX);
+    
+    /* Initialize generation config with defaults */
+    gen_config = train_float_gen_config_default();
+    
+    /* Initialize data buffer */
+    if (!data) {
+        data = (uint8_t *)malloc(DATA_MAX);
+        if (!data) {
+            data_capacity = 0;
+            data_len = 0;
+            return;
+        }
+        data_capacity = DATA_MAX;
+    }
 }
 
 /* Defined further down (near the context cache); shared by every code
@@ -651,6 +683,126 @@ int train_float_next_two_plane_fast_expert0(const uint8_t *ctx, int ctx_len) {
     route_first();
     moe_forward_top1(moe_out, mw1, mw2, scores, ctx_vec, E, DIM, HID, 0, 0, h, scratch);
     two_plane_logits_i32(logits_i, moe_out);
+    int best = 0; int32_t best_v = logits_i[0];
+    for (int o = 1; o < VOCAB; ++o) {
+        if (logits_i[o] > best_v) {
+            best_v = logits_i[o];
+            best = o;
+        }
+    }
+    return best;
+}
+/* ======================================================================
+ * Generation with Sampling Support
+ * ====================================================================== */
+
+void train_float_set_gen_config(const TrainFloatGenConfig *cfg) {
+    gen_config = *cfg;
+    sampling_set_seed(cfg->seed);
+}
+
+void train_float_get_gen_config(TrainFloatGenConfig *cfg) {
+    *cfg = gen_config;
+}
+
+/*
+ * Convert integer logits to float for sampling.
+ * We need float logits for the sampling functions.
+ */
+static void logits_i32_to_f32(float *out, const int32_t *in, int n) {
+    for (int i = 0; i < n; ++i) {
+        out[i] = (float)in[i];
+    }
+}
+
+/*
+ * Generation with temperature and top-k sampling for MoE model.
+ * This is the main improvement over pure argmax to prevent repetitive output.
+ */
+int train_float_next_two_plane_fast_moe_with_sampling(const uint8_t *ctx, int ctx_len) {
+    uint8_t buf[CTX]; ByteWindow wloc; window_reset(&wloc, buf, CTX);
+    int start = ctx_len > CTX ? ctx_len - CTX : 0;
+    for (int i = start; i < ctx_len; ++i) window_push(&wloc, ctx[i]);
+    context_vector_from_window(ctx_vec, ctx_acc, &wloc, emb, DIM, CTX);
+    route_by_prev(ctx_len > 0 ? ctx[ctx_len - 1] : 0);
+    moe_forward_top1(moe_out, mw1, mw2, scores, ctx_vec, E, DIM, HID, 0, 0, h, scratch);
+    two_plane_logits_i32(logits_i, moe_out);
+    
+    /* Use sampling if temperature > 0 */
+    if (gen_config.temperature > 0.001f && gen_config.top_k > 0) {
+        /* Convert to float for sampling */
+        logits_i32_to_f32(logits_f, logits_i, VOCAB);
+        return sample_top_k(logits_f, VOCAB, gen_config.top_k, gen_config.temperature);
+    } else if (gen_config.temperature > 0.001f) {
+        /* Temperature sampling only */
+        logits_i32_to_f32(logits_f, logits_i, VOCAB);
+        return sample_with_temperature(logits_f, VOCAB, gen_config.temperature);
+    }
+    
+    /* Fall back to argmax */
+    int best = 0; int32_t best_v = logits_i[0];
+    for (int o = 1; o < VOCAB; ++o) {
+        if (logits_i[o] > best_v) {
+            best_v = logits_i[o];
+            best = o;
+        }
+    }
+    return best;
+}
+
+/*
+ * Generation with sampling for expert0 model.
+ */
+int train_float_next_two_plane_fast_expert0_with_sampling(const uint8_t *ctx, int ctx_len) {
+    uint8_t buf[CTX]; ByteWindow wloc; window_reset(&wloc, buf, CTX);
+    int start = ctx_len > CTX ? ctx_len - CTX : 0;
+    for (int i = start; i < ctx_len; ++i) window_push(&wloc, ctx[i]);
+    context_vector_from_window(ctx_vec, ctx_acc, &wloc, emb, DIM, CTX);
+    route_first();
+    moe_forward_top1(moe_out, mw1, mw2, scores, ctx_vec, E, DIM, HID, 0, 0, h, scratch);
+    two_plane_logits_i32(logits_i, moe_out);
+    
+    /* Use sampling if temperature > 0 */
+    if (gen_config.temperature > 0.001f && gen_config.top_k > 0) {
+        logits_i32_to_f32(logits_f, logits_i, VOCAB);
+        return sample_top_k(logits_f, VOCAB, gen_config.top_k, gen_config.temperature);
+    } else if (gen_config.temperature > 0.001f) {
+        logits_i32_to_f32(logits_f, logits_i, VOCAB);
+        return sample_with_temperature(logits_f, VOCAB, gen_config.temperature);
+    }
+    
+    /* Fall back to argmax */
+    int best = 0; int32_t best_v = logits_i[0];
+    for (int o = 1; o < VOCAB; ++o) {
+        if (logits_i[o] > best_v) {
+            best_v = logits_i[o];
+            best = o;
+        }
+    }
+    return best;
+}
+
+/*
+ * Generation with sampling for regular (non-MoE) model.
+ */
+int train_float_next_two_plane_fast_with_sampling(const uint8_t *ctx, int ctx_len) {
+    uint8_t buf[CTX]; ByteWindow wloc; window_reset(&wloc, buf, CTX);
+    int start = ctx_len > CTX ? ctx_len - CTX : 0;
+    for (int i = start; i < ctx_len; ++i) window_push(&wloc, ctx[i]);
+    context_vector_from_window(ctx_vec, ctx_acc, &wloc, emb, DIM, CTX);
+    fast_relu(moe_out, ctx_vec, DIM);
+    two_plane_logits_i32(logits_i, moe_out);
+    
+    /* Use sampling if temperature > 0 */
+    if (gen_config.temperature > 0.001f && gen_config.top_k > 0) {
+        logits_i32_to_f32(logits_f, logits_i, VOCAB);
+        return sample_top_k(logits_f, VOCAB, gen_config.top_k, gen_config.temperature);
+    } else if (gen_config.temperature > 0.001f) {
+        logits_i32_to_f32(logits_f, logits_i, VOCAB);
+        return sample_with_temperature(logits_f, VOCAB, gen_config.temperature);
+    }
+    
+    /* Fall back to argmax */
     int best = 0; int32_t best_v = logits_i[0];
     for (int o = 1; o < VOCAB; ++o) {
         if (logits_i[o] > best_v) {
