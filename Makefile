@@ -1,5 +1,5 @@
 ######################################################################
-# ternary-moe build
+# ternary-moe build - Optimized for cross-platform (x86_64, ARM64, Termux)
 #
 #   make            build lib + all apps
 #   make test       build & run every tests/test_*.c, print a summary
@@ -10,6 +10,8 @@
 # Override CC / CFLAGS on the command line if needed, e.g. on a
 # Termux/Android box without -march=native support:
 #   make CFLAGS_ARCH=
+# For ARM64 with NEON support:
+#   make ARCH_FLAGS="-mcpu=neoverse-v1 -mtune=neoverse-v1"
 ######################################################################
 
 CC       ?= cc
@@ -20,15 +22,31 @@ BENCH_DIR:= bench
 BUILD    := build
 BIN      := bin
 
-# -march=native isn't always available (older gcc, some cross setups),
-# so probe for it once instead of hard-failing the whole build.
+# Architecture detection and flags
+UNAME_M := $(shell uname -m 2>/dev/null || echo unknown)
+
+# Default architecture flags
 CFLAGS_ARCH ?= $(shell $(CC) -march=native -E -x c /dev/null >/dev/null 2>&1 && echo -march=native)
 
-WARN     := -Wall -Wextra
-OPT      := -O3 -funroll-loops -fomit-frame-pointer $(CFLAGS_ARCH)
+# ARM64/NEON optimization flags
+ifeq ($(UNAME_M),aarch64)
+  # Check if compiler supports NEON
+  NEON_SUPPORT := $(shell $(CC) -mfpu=neon -E -x c /dev/null >/dev/null 2>&1 && echo -mfpu=neon)
+  CFLAGS_ARCH += $(NEON_SUPPORT)
+  # Try to detect best ARM CPU
+  CPU_FLAGS := $(shell $(CC) -mcpu=native -E -x c /dev/null >/dev/null 2>&1 && echo -mcpu=native)
+  CFLAGS_ARCH += $(CPU_FLAGS)
+endif
+
+# Common optimization flags
+WARN     := -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
+OPT      := -O3 -funroll-loops -fomit-frame-pointer -ffast-math -fno-finite-math-only
 STD      := -std=c11 -D_POSIX_C_SOURCE=199309L
-CFLAGS   ?= $(STD) $(WARN) $(OPT) -I$(SRC_DIR)
+CFLAGS   ?= $(STD) $(WARN) $(OPT) $(CFLAGS_ARCH) -I$(SRC_DIR)
 LDLIBS   := -lm
+
+# Additional security/performance flags
+CFLAGS   += -fstrict-aliasing -fno-strict-overflow
 
 SRCS     := $(wildcard $(SRC_DIR)/*.c)
 OBJS     := $(patsubst $(SRC_DIR)/%.c,$(BUILD)/obj/%.o,$(SRCS))
@@ -78,3 +96,10 @@ bench: $(BENCH_BINS)
 
 clean:
 	rm -rf $(BUILD) $(BIN)
+
+# Display build info
+info:
+	@echo "CC: $(CC)"
+	@echo "CFLAGS: $(CFLAGS)"
+	@echo "UNAME_M: $(UNAME_M)"
+	@echo "CFLAGS_ARCH: $(CFLAGS_ARCH)"

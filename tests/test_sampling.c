@@ -46,7 +46,8 @@ int main(void) {
     /* Test find_top_k */
     int indices[2];
     find_top_k(indices, logits, 4, 2);
-    /* Should return indices 1 and 3 (values 5.0 and 3.0) */
+    /* Should return indices 1 and 3 (values 5.0 and 3.0) in descending order */
+    /* Note: our implementation returns sorted indices (highest first) */
     if (indices[0] != 1) return 1;
     if (indices[1] != 3) return 1;
     
